@@ -1,0 +1,134 @@
+image: atlassian/default-image:3
+
+definitions:
+  scripts:
+    - script: &notify-fail
+        - if [[ BITBUCKET_EXIT_CODE -eq 0 ]]; then exit 0; else echo 'failed'; fi
+        - echo "common script"
+        - pipe: docker://appscyclone/bitbucket-notification:1
+          variables:
+            MS_WEBHOOK_DEPLOYMENT: $MS_WEBHOOK_DEPLOYMENT
+            ENVIRONMENT: $BITBUCKET_DEPLOYMENT_ENVIRONMENT
+            MODE: "failed"
+
+  services:
+    docker:
+      memory: 2048
+  steps:
+    - step: &build-docker
+        name: Build and Push Image
+        size: 2x
+        services:
+          - docker
+        caches:
+          - docker
+          - node
+        script:
+          - export IMAGE_TAG=$BITBUCKET_BRANCH-$BITBUCKET_BUILD_NUMBER
+          - docker build -t ${IMAGE_NAME}:$IMAGE_TAG --file ./.docker/Dockerfile .
+          - pipe: atlassian/aws-ecr-push-image:1.5.0
+            variables:
+              AWS_ACCESS_KEY_ID: $AWS_ACCESS_KEY_ID
+              AWS_SECRET_ACCESS_KEY: $AWS_SECRET_ACCESS_KEY
+              AWS_DEFAULT_REGION: $AWS_DEFAULT_REGION
+              IMAGE_NAME: $IMAGE_NAME:$IMAGE_TAG
+              TAGS: '${IMAGE_TAG} latest'
+    - step: &build-docker-tag
+        name: Build and Push Image
+        size: 2x
+        services:
+          - docker
+        caches:
+          - docker
+          - node
+        script:
+          - export IMAGE_TAG=$BITBUCKET_TAG
+          - docker build -t ${IMAGE_NAME}:$IMAGE_TAG --file ./.docker/Dockerfile .
+          - pipe: atlassian/aws-ecr-push-image:1.5.0
+            variables:
+              AWS_ACCESS_KEY_ID: $AWS_ACCESS_KEY_ID
+              AWS_SECRET_ACCESS_KEY: $AWS_SECRET_ACCESS_KEY
+              AWS_DEFAULT_REGION: $AWS_DEFAULT_REGION
+              IMAGE_NAME: $IMAGE_NAME:$IMAGE_TAG
+              TAGS: "${IMAGE_TAG} latest"
+    - step: &deploy
+        services:
+          - docker
+        caches:
+          - docker
+        script:
+          - pipe: docker://appscyclone/bitbucket-notification:1
+            variables:
+              MS_WEBHOOK_DEPLOYMENT: $MS_WEBHOOK_DEPLOYMENT
+              ENVIRONMENT: $BITBUCKET_DEPLOYMENT_ENVIRONMENT
+              MODE: "start"
+          - pipe: docker://appscyclone/aws-ecs-update-service:1
+            variables:
+              ECS_IMAGE: "$AWS_REGISTRY_URL:$BITBUCKET_BRANCH-$BITBUCKET_BUILD_NUMBER"
+              ECS_IMAGE_TAG: $ECS_IMAGE_TAG
+              ECS_CLUSTER_NAME: $ECS_CLUSTER_NAME
+              ECS_SERVICE_NAME: $ECS_SERVICE_NAME
+              ECS_TASK_NAME: $ECS_TASK_NAME
+              AWS_ACCESS_KEY_ID: $AWS_ACCESS_KEY_ID
+              AWS_SECRET_ACCESS_KEY: $AWS_SECRET_ACCESS_KEY
+              AWS_DEFAULT_REGION: $AWS_DEFAULT_REGION
+          - pipe: docker://appscyclone/bitbucket-notification:1
+            variables:
+              MS_WEBHOOK_DEPLOYMENT: $MS_WEBHOOK_DEPLOYMENT
+              ENVIRONMENT: $BITBUCKET_DEPLOYMENT_ENVIRONMENT
+              MODE: "successful"
+              CHANGE: $(git log ${BITBUCKET_COMMIT}^..${BITBUCKET_COMMIT} --pretty=%B | sort | uniq)
+        after-script: *notify-fail
+    - step: &deploy-tag
+        services:
+          - docker
+        caches:
+          - docker
+        script:
+          - pipe: docker://appscyclone/bitbucket-notification:1
+            variables:
+              MS_WEBHOOK_DEPLOYMENT: $MS_WEBHOOK_DEPLOYMENT
+              ENVIRONMENT: $BITBUCKET_DEPLOYMENT_ENVIRONMENT
+              MODE: "start"
+          - pipe: docker://appscyclone/aws-ecs-update-service:1
+            variables:
+              ECS_IMAGE: "$AWS_REGISTRY_URL:$BITBUCKET_TAG"
+              ECS_IMAGE_TAG: $BITBUCKET_TAG
+              ECS_CLUSTER_NAME: $ECS_CLUSTER_NAME
+              ECS_SERVICE_NAME: $ECS_SERVICE_NAME
+              ECS_TASK_NAME: $ECS_TASK_NAME
+              AWS_ACCESS_KEY_ID: $AWS_ACCESS_KEY_ID
+              AWS_SECRET_ACCESS_KEY: $AWS_SECRET_ACCESS_KEY
+              AWS_DEFAULT_REGION: $AWS_DEFAULT_REGION
+          - pipe: docker://appscyclone/bitbucket-notification:1
+            variables:
+              MS_WEBHOOK_DEPLOYMENT: $MS_WEBHOOK_DEPLOYMENT
+              ENVIRONMENT: $BITBUCKET_DEPLOYMENT_ENVIRONMENT
+              MODE: "successful"
+              CHANGE: $(git log ${BITBUCKET_COMMIT}^..${BITBUCKET_COMMIT} --pretty=%B | sort | uniq)
+        after-script: *notify-fail
+pipelines:
+  branches:
+    develop:
+      # dev-environment
+      - step: *build-docker
+      - step:
+          <<: *deploy
+          name: Deploy to dev
+          deployment: dev
+
+    staging:
+      # staging-environment
+      - step: *build-docker
+      - step:
+          <<: *deploy
+          name: Deploy to staging
+          deployment: staging
+  tags:
+    v*:
+      # production-environment
+      - step: *build-docker-tag
+      - step:
+          <<: *deploy-tag
+          name: Deploy to production
+          deployment: production
